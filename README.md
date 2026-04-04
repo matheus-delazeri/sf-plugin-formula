@@ -87,12 +87,12 @@ Activate debug mode (more logs)
 
 - Run a formula without variables:
 
-  <%= config.bin %> <%= command.id %> --formula 'IF(TRUE, "Yes", "No")'
+  sf formula evaluate --formula 'IF(TRUE, "Yes", "No")'
 
 - Run a formula with variables and multiple records:
 
-  <%= config.bin %> <%= command.id %> --formula 'Amount\_\_c \* 2' --records '[{"Amount**c":{"type":"literal" "dataType":"number","value":100,"options":{"length":6,"scale":2}}}]
+  sf formula evaluate --formula 'Amount\_\_c \* 2' --records '[{"Amount**c":{"type":"literal" "dataType":"number","value":100,"options":{"length":6,"scale":2}}}]
 
 - Run a formula from a JSON file:
 
-  <%= config.bin %> <%= command.id %> --inputfile ./my-formula.json
+  sf formula evaluate --inputfile ./my-formula.json
