@@ -1,0 +1,9 @@
+{
+  "extends": "@salesforce/dev-config/tsconfig-test-strict-esm",
+  "include": ["./**/*.ts", "../src/**/*.ts", "../src/types/**/*.d.ts"],
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "typeRoots": ["../node_modules/@types", "../src/types"]
+  }
+}
