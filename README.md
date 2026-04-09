@@ -20,6 +20,7 @@ sf plugins install sf-plugin-formula
 - **Multi-record evaluation** - evaluate the same formula against multiple records in one run.
 - **Flexible input** - pass the formula and records as CLI flags, or point to a JSON file containing both.
 - **Per-record error reporting** - type mismatches, wrong argument counts, and other Formulon errors are reported per record instead of aborting the whole run.
+- **Assertion support** - add `_expected` to any record to automatically verify the formula result against an expected value.
 
 ## Usage
 
@@ -39,25 +40,76 @@ sf formula evaluate --inputfile ./my-formula.json
 
 ## Examples
 
-Evaluate a formula with no variables:
+### Evaluate a formula with no variables
 
 ```shell
-sf formula:evaluate --formula 'IF(TRUE, "Yes", "No")'
+sf formula evaluate --formula 'IF(TRUE, "Yes", "No")'
 ```
 
-Evaluate a formula with variables across multiple records:
+### Evaluate a formula with variables across multiple records
 
 ```shell
-sf formula:evaluate \
+sf formula evaluate \
   --formula 'Amount__c * 2' \
   --records '[{"Amount__c":{"dataType":"number","value":100,"options":{"length":6,"scale":2}}}]'
 ```
 
-Evaluate a formula from a JSON file:
+### Evaluate a formula from a JSON file
 
 ```shell
-sf formula:evaluate --inputfile ./my-formula.json
+sf formula evaluate --inputfile ./my-formula.json
 ```
+
+### Evaluate a conditional text formula
+
+`my-formula.json`:
+
+```json
+{
+  "formula": "IF(IsActive__c, \"Active\", \"Inactive\")",
+  "records": [
+    { "IsActive__c": { "dataType": "checkbox", "value": true } },
+    { "IsActive__c": { "dataType": "checkbox", "value": false } }
+  ]
+}
+```
+
+```shell
+sf formula evaluate --inputfile ./my-formula.json
+```
+
+<img width="774" height="189" alt="image" src="https://github.com/user-attachments/assets/d1a17873-3a20-4f78-8ee8-8b8357a83220" />
+
+### Evaluate a number formula with assertions
+
+Use `_expected` on any record to assert the result. Records without `_expected` are still evaluated and their assertion column will just show `-`.
+
+`my-formula.json`:
+
+```json
+{
+  "formula": "Amount__c * 1.1",
+  "records": [
+    {
+      "Amount__c": { "dataType": "number", "value": 100, "options": { "length": 6, "scale": 2 } },
+      "_expected": { "dataType": "number", "value": 110 }
+    },
+    {
+      "Amount__c": { "dataType": "number", "value": 200, "options": { "length": 6, "scale": 2 } },
+      "_expected": { "dataType": "number", "value": 210 }
+    },
+    {
+      "Amount__c": { "dataType": "number", "value": 500, "options": { "length": 6, "scale": 2 } }
+    }
+  ]
+}
+```
+
+```shell
+sf formula evaluate --inputfile ./my-formula.json
+```
+
+<img width="1026" height="241" alt="image" src="https://github.com/user-attachments/assets/adc2382c-b88e-45df-867c-d8715c9ad1be" />
 
 ## Input file format
 
@@ -81,8 +133,9 @@ When using `--inputfile`, the file must be a JSON object with this shape:
 
 Each entry in `records` is a map of **field API name → Formulon variable descriptor**:
 
-| Property   | Required | Description                                                                              |
-| ---------- | -------- | ---------------------------------------------------------------------------------------- |
-| `dataType` | Yes      | One of: `text`, `number`, `checkbox`, `date`, `time`, `datetime`, `geolocation`, `null`. |
-| `value`    | Yes      | The field's value as a native JS type.                                                   |
-| `options`  | No       | Additional type options (e.g. `length`, `scale` for numbers). Defaults to `{}`.          |
+| Property    | Required | Description                                                                              |
+| ----------- | -------- | ---------------------------------------------------------------------------------------- |
+| `dataType`  | Yes      | One of: `text`, `number`, `checkbox`, `date`, `time`, `datetime`, `geolocation`, `null`. |
+| `value`     | Yes      | The field's value as a native JS type.                                                   |
+| `options`   | No       | Additional type options (e.g. `length`, `scale` for numbers). Defaults to `{}`.          |
+| `_expected` | No       | Expected result descriptor. When present, the output shows a PASS/FAIL assertion column. |

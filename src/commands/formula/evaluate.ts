@@ -17,6 +17,7 @@ import {
   type FormulaVariable,
   type FormulaLiteralResult,
   type FormulaErrorResult,
+  EXPECTED_KEY,
 } from '../../utils/formulaUtils.js';
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
@@ -357,7 +358,11 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
   }
 
   private display(summary: FormulaEvaluationSummary, debugMode: boolean): void {
-    const variableColumns = [...new Set(summary.results.flatMap((r) => Object.keys(r.variables)))];
+    const variableColumns = [
+      ...new Set(summary.results.flatMap((r) => Object.keys(r.variables).filter((k) => k !== EXPECTED_KEY))),
+    ];
+
+    const hasExpected = summary.results.some((r) => r.expected !== undefined);
 
     const columns = [
       'record',
@@ -366,9 +371,11 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
       'result_type',
       'result_value',
       'status',
+      ...(hasExpected ? ['expected', 'assertion'] : []),
     ];
 
     uxLog('success', this, c.green('Formula evaluation results'));
+    uxLog('other', this, c.white(`Formula: ${summary.formula}`));
 
     const tableRows = summary.results.map((r) => {
       const row: Record<string, string> = {
@@ -377,7 +384,7 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
 
       for (const varName of variableColumns) {
         const varDescriptor = r.variables[varName];
-        row[`${varName}_type`] = varDescriptor?.dataType ?? '—';
+        row[`${varName}_type`] = varDescriptor?.dataType ?? '-';
         row[`${varName}_value`] = varDescriptor !== undefined ? JSON.stringify(varDescriptor.value) : '-';
       }
 
@@ -393,19 +400,52 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
         row['status'] = 'OK';
       }
 
+      if (hasExpected) {
+        if (r.expected === undefined) {
+          row['expected'] = '-';
+          row['assertion'] = '-';
+        } else {
+          const actualValue = r.isError ? undefined : (r.result as FormulaLiteralResult).value;
+          // eslint-disable-next-line eqeqeq
+          const passed = !r.isError && actualValue == r.expected;
+          row['expected'] = JSON.stringify(r.expected);
+          row['assertion'] = passed
+            ? '✅ PASS'
+            : `❌ FAIL - expected ${JSON.stringify(r.expected)}, got ${JSON.stringify(actualValue)}`;
+        }
+      }
+
       return row;
     });
 
     uxLogTable(this, tableRows, columns);
 
-    if (summary.errorCount === 0) {
+    const assertionFailures = hasExpected
+      ? summary.results.filter((r) => {
+          if (r.expected === undefined) return false;
+          if (r.isError) return true;
+          // eslint-disable-next-line eqeqeq
+          return (r.result as FormulaLiteralResult).value != r.expected;
+        }).length
+      : 0;
+
+    if (summary.errorCount === 0 && assertionFailures === 0) {
       uxLog('action', this, c.green(`Formula evaluated successfully for all ${summary.successCount} record(s).`));
     } else {
-      uxLog(
-        'warning',
-        this,
-        c.yellow(`Evaluation complete: ${summary.successCount} succeeded, ${summary.errorCount} failed.`)
-      );
+      if (summary.errorCount > 0) {
+        uxLog(
+          'warning',
+          this,
+          c.yellow(`Evaluation complete: ${summary.successCount} succeeded, ${summary.errorCount} failed.`)
+        );
+      }
+      if (assertionFailures > 0) {
+        uxLog(
+          'warning',
+          this,
+          c.red(`Assertion failures: ${assertionFailures} record(s) did not match the expected value.`)
+        );
+      }
     }
 
     if (debugMode) {
