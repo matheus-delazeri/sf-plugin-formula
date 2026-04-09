@@ -54,9 +54,17 @@ export function evaluateFormulaForRecords(formula: string, records: FormulaVaria
     let isError = false;
     let rawResult: FormulaParseResult;
     try {
-      rawResult = (parse as (f: string, vars: FormulaVariableMap) => FormulaParseResult)(formula, variables);
+      rawResult = (parse as (f: string, vars: FormulaVariableMap) => FormulaParseResult)(
+        formula,
+        Object.fromEntries(
+          Object.entries(variables).map(([key, v]) => [
+            key,
+            { ...v, options: v.options ?? {} },
+          ]) /** Add options even if not used for Formulon compatibility */
+        )
+      );
       isError = rawResult.type === 'error';
-    } catch (_) {
+    } catch (e: unknown) {
       rawResult = {
         type: 'error',
         errorType: 'Unparsable formula',
