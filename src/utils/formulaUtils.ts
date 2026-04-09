@@ -32,6 +32,7 @@ export type FormulaEvaluationResult = {
   variables: FormulaVariableMap;
   result: FormulaParseResult;
   isError: boolean;
+  expected?: unknown;
 };
 
 export type FormulaEvaluationSummary = {
@@ -50,13 +51,32 @@ export function evaluateFormulaForRecords(formula: string, records: FormulaVaria
     // even if not parseable, we still want to return a structured error
   }
 
-  const results: FormulaEvaluationResult[] = records.map((variables, recordIndex) => {
+  const results: FormulaEvaluationResult[] = records.map((rawVariables, recordIndex) => {
+    const { expected, clean: variables } = extractExpected(rawVariables);
     let isError = false;
     let rawResult: FormulaParseResult;
     try {
-      rawResult = (parse as (f: string, vars: FormulaVariableMap) => FormulaParseResult)(formula, variables);
+      rawResult = (parse as (f: string, vars: FormulaVariableMap) => FormulaParseResult)(
+        formula,
+        Object.fromEntries(
+          Object.entries(variables).map(([key, v]) => [
+            key,
+            { ...v, options: v.options ?? {} },
+          ]) /** Add options even if not used for Formulon compatibility */
+        )
+      );
+
+      const maxScale = Math.max(
+        0,
+        ...Object.values(variables).map((v) => (v.options?.scale as number | undefined) ?? 0)
+      );
+
+      if (rawResult.dataType === 'number' && typeof rawResult.value === 'number') {
+        rawResult = { ...rawResult, value: parseFloat(rawResult.value.toFixed(maxScale)) };
+      }
+
       isError = rawResult.type === 'error';
-    } catch (_) {
+    } catch (e: unknown) {
       rawResult = {
         type: 'error',
         errorType: 'Unparsable formula',
@@ -64,7 +84,7 @@ export function evaluateFormulaForRecords(formula: string, records: FormulaVaria
       };
       isError = true;
     }
-    return { recordIndex, variables, result: rawResult, isError };
+    return { recordIndex, variables, result: rawResult, isError, expected };
   });
 
   const errorCount = results.filter((r) => r.isError).length;
@@ -118,6 +138,16 @@ export function summaryToJson(summary: FormulaEvaluationSummary): Record<string,
       isError: r.isError,
       result: r.result,
     })),
+  };
+}
+
+export const EXPECTED_KEY = '_expected';
+
+export function extractExpected(record: FormulaVariableMap): { expected: unknown; clean: FormulaVariableMap } {
+  const { [EXPECTED_KEY]: expectedVar, ...clean } = record;
+  return {
+    expected: expectedVar !== undefined ? expectedVar.value : undefined,
+    clean: clean as FormulaVariableMap,
   };
 }
 
