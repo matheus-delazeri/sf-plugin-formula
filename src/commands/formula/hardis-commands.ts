@@ -14,6 +14,7 @@ export default class HardisCommands extends SfCommand<AnyJson> {
 
   // eslint-disable-next-line @typescript-eslint/require-await, class-methods-use-this
   public async run(): Promise<AnyJson> {
+    const help = 'https://github.com/matheus-delazeri/sf-plugin-formula';
     return {
       customCommands: [
         {
@@ -27,11 +28,51 @@ export default class HardisCommands extends SfCommand<AnyJson> {
               id: 'formula-evaluate',
               label: 'Evaluate Formula',
               command: 'sf formula:evaluate',
-              tooltip: 'Evaluates a Salesforce formula against one or more records and returns the result for each.',
-              helpUrl: 'https://github.com/matheus-delazeri/sf-plugin-formula',
+              tooltip: 'Evaluate a Salesforce formula against one or more records.',
+              helpUrl: help,
               icon: 'default.svg',
               vscodeIcon: 'play',
               sldsIcon: 'utility:play',
+            },
+            {
+              id: 'formula-test',
+              label: 'Test Formulas',
+              command: 'sf formula:test',
+              tooltip: 'Run a suite of formula test cases with assertions (CI friendly).',
+              helpUrl: help,
+              icon: 'default.svg',
+              vscodeIcon: 'beaker',
+              sldsIcon: 'utility:test',
+            },
+            {
+              id: 'formula-analyze',
+              label: 'Analyze Formula',
+              command: 'sf formula:analyze',
+              tooltip: 'Static analysis: dependencies, complexity, lint and branch coverage.',
+              helpUrl: help,
+              icon: 'default.svg',
+              vscodeIcon: 'search',
+              sldsIcon: 'utility:search',
+            },
+            {
+              id: 'formula-scaffold',
+              label: 'Scaffold Formula Input',
+              command: 'sf formula:scaffold',
+              tooltip: 'Generate a ready-to-fill input JSON template for a formula.',
+              helpUrl: help,
+              icon: 'default.svg',
+              vscodeIcon: 'new-file',
+              sldsIcon: 'utility:new',
+            },
+            {
+              id: 'formula-diff',
+              label: 'Diff Formulas',
+              command: 'sf formula:diff',
+              tooltip: 'Compare two formulas across the same records to check equivalence.',
+              helpUrl: help,
+              icon: 'default.svg',
+              vscodeIcon: 'diff',
+              sldsIcon: 'utility:comparison',
             },
           ],
         },

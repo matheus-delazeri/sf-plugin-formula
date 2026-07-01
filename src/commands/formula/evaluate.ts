@@ -1,33 +1,35 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, watchFile } from 'node:fs';
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
 import { extract } from '@steedos/formula';
 import c from 'chalk';
 import { Messages } from '@salesforce/core';
 import { AnyJson } from '@salesforce/ts-types';
-import { uxLog, uxLogTable, prompts, PromptsQuestion } from 'sfdx-hardis/plugin-api';
+import { uxLog, prompts, PromptsQuestion } from 'sfdx-hardis/plugin-api';
 import {
   evaluateFormulaForRecords,
   formatEvaluationSummary,
   summaryToJson,
   buildModelJson,
+  exitCodeFor,
   type FormulaVariableMap,
   type FormulaEvaluationSummary,
   type FormulaDataType,
   type FormulaEvaluationResult,
   type FormulaVariable,
-  type FormulaLiteralResult,
-  type FormulaErrorResult,
-  EXPECTED_KEY,
 } from '../../utils/formulaUtils.js';
+import {
+  describeSObjectFieldTypes,
+  pullFormulaField,
+  queryRecordVariableMaps,
+  type FieldTypeInfo,
+} from '../../utils/orgUtils.js';
+import { renderSummaryTable, serializeSummaries, writeToFile } from '../../utils/ioUtils.js';
+import { type OutputFormat } from '../../utils/reportUtils.js';
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
 const messages = Messages.loadMessages('sf-plugin-formula', 'sf-plugin-formula.evaluate');
 
-type InputFileJson = {
-  formula: string;
-  records: FormulaVariableMap[];
-};
-
+type InputFileJson = { formula: string; records: FormulaVariableMap[] };
 type PromptAnswer = Record<string, unknown>;
 
 export default class FormulaEvaluate extends SfCommand<AnyJson> {
@@ -36,35 +38,27 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
   public static readonly examples = [messages.getMessage('examples')];
 
   public static readonly flags = {
-    formula: Flags.string({
-      char: 'f',
-      summary: messages.getMessage('flags.formula.summary'),
-      description: messages.getMessage('flags.formula.description'),
+    formula: Flags.string({ char: 'f', summary: messages.getMessage('flags.formula.summary') }),
+    records: Flags.string({ char: 'r', summary: messages.getMessage('flags.records.summary') }),
+    inputfile: Flags.string({ char: 'x', summary: messages.getMessage('flags.inputfile.summary') }),
+    field: Flags.string({ summary: messages.getMessage('flags.field.summary') }),
+    sobject: Flags.string({ char: 's', summary: messages.getMessage('flags.sobject.summary') }),
+    query: Flags.string({ char: 'q', summary: messages.getMessage('flags.query.summary') }),
+    'target-org': Flags.optionalOrg(),
+    'output-format': Flags.string({
+      summary: messages.getMessage('flags.output-format.summary'),
+      options: ['table', 'json', 'csv', 'markdown'],
+      default: 'table',
     }),
-    records: Flags.string({
-      char: 'r',
-      summary: messages.getMessage('flags.records.summary'),
-      description: messages.getMessage('flags.records.description'),
-    }),
-    inputfile: Flags.string({
-      char: 'x',
-      summary: messages.getMessage('flags.inputfile.summary'),
-      description: messages.getMessage('flags.inputfile.description'),
-    }),
-    debug: Flags.boolean({
-      char: 'd',
-      default: false,
-      summary: messages.getMessage('flags.debug.summary'),
-    }),
+    outputfile: Flags.string({ summary: messages.getMessage('flags.outputfile.summary') }),
+    tolerance: Flags.integer({ summary: messages.getMessage('flags.tolerance.summary') }),
+    strict: Flags.boolean({ default: false, summary: messages.getMessage('flags.strict.summary') }),
+    watch: Flags.boolean({ default: false, summary: messages.getMessage('flags.watch.summary') }),
+    debug: Flags.boolean({ char: 'd', default: false, summary: messages.getMessage('flags.debug.summary') }),
   };
 
   private static buildVariablePrompt(varName: string, dataType: FormulaDataType): PromptsQuestion {
-    const base = {
-      name: varName,
-      description: `Value for the "${varName}" field (${dataType})`,
-      placeholder: '',
-    };
-
+    const base = { name: varName, description: `Value for the "${varName}" field (${dataType})`, placeholder: '' };
     switch (dataType) {
       case 'checkbox':
         return {
@@ -109,18 +103,9 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
           validate: (v: string) => (/^\d{2}:\d{2}(:\d{2})?$/.test(v?.trim()) ? true : 'Use HH:MM or HH:MM:SS format'),
         };
       case 'null':
-        return {
-          ...base,
-          type: 'confirm',
-          message: `"${varName}" will be set to null. Confirm?`,
-          initial: true,
-        };
+        return { ...base, type: 'confirm', message: `"${varName}" will be set to null. Confirm?`, initial: true };
       default:
-        return {
-          ...base,
-          type: 'text',
-          message: `Value for "${varName}" (text)`,
-        };
+        return { ...base, type: 'text', message: `Value for "${varName}" (text)` };
     }
   }
 
@@ -144,33 +129,64 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
   public async run(): Promise<AnyJson> {
     const { flags } = await this.parse(FormulaEvaluate);
     const debugMode: boolean = flags.debug ?? false;
-    let formula: string;
-    let records: FormulaVariableMap[] | null = null;
-    let lastSummary: FormulaEvaluationSummary | null = null;
+    const outputFormat = flags['output-format'] as OutputFormat;
+    const org = flags['target-org'];
+    // eslint-disable-next-line sf-plugin/get-connection-with-version
+    const conn = org?.getConnection();
 
-    if (flags.inputfile) {
-      uxLog('log', this, c.grey(`Reading formula and records from ${flags.inputfile}…`));
-      const fileContent = readFileSync(flags.inputfile, 'utf-8');
-      const raw = JSON.parse(fileContent) as InputFileJson;
+    let formula: string | undefined = flags.formula;
+    let sobject: string | undefined = flags.sobject;
 
-      if (typeof raw?.formula !== 'string') {
-        throw new Error(`"formula" key (string) is required in ${flags.inputfile}`);
-      }
-      if (!Array.isArray(raw?.records)) {
-        throw new Error(`"records" key (array) is required in ${flags.inputfile}`);
-      }
-
-      formula = raw.formula;
-      records = raw.records;
-      lastSummary = this.evaluate(formula, records);
-      this.display(lastSummary, debugMode);
-      return summaryToJson(lastSummary) as AnyJson;
+    if (flags.field) {
+      if (!conn) throw new Error('--field requires a --target-org connection.');
+      const pulled = await pullFormulaField(conn, flags.field);
+      formula = pulled.formula;
+      sobject = sobject ?? pulled.sobject;
+      uxLog('action', this, c.cyan(`Pulled formula from ${flags.field}: ${formula}`));
     }
 
-    if (flags.formula) {
-      formula = flags.formula;
+    if (flags.inputfile && !flags.field) {
+      const inputPath: string = flags.inputfile;
+      const runOnce = (): FormulaEvaluationSummary => {
+        const raw = JSON.parse(readFileSync(inputPath, 'utf-8')) as InputFileJson;
+        if (typeof raw?.formula !== 'string') throw new Error(`"formula" key (string) is required in ${inputPath}`);
+        if (!Array.isArray(raw?.records)) throw new Error(`"records" key (array) is required in ${inputPath}`);
+        const summary = this.evaluate(raw.formula, raw.records, flags.tolerance);
+        this.display(summary, debugMode, outputFormat, flags.outputfile);
+        return summary;
+      };
 
-      if (flags.records) {
+      let summary = runOnce();
+      if (flags.watch) {
+        uxLog('action', this, c.cyan(`Watching ${inputPath} for changes (Ctrl+C to stop)…`));
+        watchFile(inputPath, { interval: 400 }, () => {
+          try {
+            summary = runOnce();
+          } catch (e) {
+            uxLog('error', this, c.red((e as Error).message));
+          }
+        });
+        return summaryToJson(summary) as AnyJson;
+      }
+      process.exitCode = exitCodeFor(summary, flags.strict);
+      return summaryToJson(summary) as AnyJson;
+    }
+
+    let typeMap = new Map<string, FieldTypeInfo>();
+    if (conn && sobject) {
+      typeMap = await describeSObjectFieldTypes(conn, sobject);
+      uxLog('log', this, c.grey(`Described ${sobject}: ${typeMap.size} fields.`));
+    }
+
+    if (formula) {
+      let records: FormulaVariableMap[] | null = null;
+      const referenced = this.safeExtract(formula);
+
+      if (flags.query) {
+        if (!conn) throw new Error('--query requires a --target-org connection.');
+        records = await queryRecordVariableMaps(conn, flags.query, typeMap, referenced);
+        uxLog('action', this, c.cyan(`Pulled ${records.length} record(s) from the org.`));
+      } else if (flags.records) {
         try {
           const parsed = JSON.parse(flags.records) as unknown;
           if (!Array.isArray(parsed)) throw new Error('--records must be a JSON array.');
@@ -181,9 +197,10 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
       }
 
       records = records ?? [{}];
-      lastSummary = this.evaluate(formula, records);
-      this.display(lastSummary, debugMode);
-      return summaryToJson(lastSummary) as AnyJson;
+      const summary = this.evaluate(formula, records, flags.tolerance);
+      this.display(summary, debugMode, outputFormat, flags.outputfile);
+      process.exitCode = exitCodeFor(summary, flags.strict);
+      return summaryToJson(summary) as AnyJson;
     }
 
     const modeAnswer = await prompts({
@@ -191,15 +208,16 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
       name: 'mode',
       message: 'How do you want to evaluate the formula?',
       description:
-        'Interactive mode lets you fill in values manually and repeat. JSON mode evaluates a set of records from a file.',
+        'Interactive mode lets you fill in values manually and repeat. JSON mode evaluates a set of records.',
       choices: [
         { title: '✏️  [Interactive] fill in values manually (repeatable)', value: 'interactive' },
         { title: '📄  [JSON format] evaluate a set of records from a JSON file', value: 'json' },
       ],
     });
 
+    let lastSummary: FormulaEvaluationSummary;
     if (modeAnswer.mode === 'json') {
-      lastSummary = await this.runJsonContent(debugMode);
+      lastSummary = await this.runJsonContent(debugMode, outputFormat, flags.outputfile, flags.tolerance);
     } else {
       const formulaAnswer = await prompts({
         type: 'text',
@@ -209,19 +227,39 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
         placeholder: 'IF(Active__c, "Yes", "No")',
         validate: (v: string) => (v?.trim() ? true : 'Formula cannot be empty'),
       });
-
-      formula = (formulaAnswer.formula as string).trim();
-      const referencedVariables = (extract as (f: string) => string[])(formula);
-      lastSummary = await this.runInteractiveLoop(formula, referencedVariables, debugMode);
+      const enteredFormula = (formulaAnswer.formula as string).trim();
+      const referencedVariables = this.safeExtract(enteredFormula);
+      lastSummary = await this.runInteractiveLoop(
+        enteredFormula,
+        referencedVariables,
+        debugMode,
+        outputFormat,
+        flags.outputfile,
+        flags.tolerance,
+        typeMap
+      );
     }
-
+    process.exitCode = exitCodeFor(lastSummary, flags.strict);
     return summaryToJson(lastSummary) as AnyJson;
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  private safeExtract(formula: string): string[] {
+    try {
+      return (extract as (f: string) => string[])(formula);
+    } catch (_) {
+      return [];
+    }
   }
 
   private async runInteractiveLoop(
     formula: string,
     referencedVariables: string[],
-    debugMode: boolean
+    debugMode: boolean,
+    outputFormat: OutputFormat,
+    outputfile: string | undefined,
+    tolerance: number | undefined,
+    typeMap: Map<string, FieldTypeInfo>
   ): Promise<FormulaEvaluationSummary> {
     let summary: FormulaEvaluationSummary | null = null;
     let keepGoing = true;
@@ -231,62 +269,63 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
     while (keepGoing) {
       iterationCount++;
       uxLog('log', this, c.cyan(`\n[Evaluation ${iterationCount}]`));
-
       const record: FormulaVariableMap = {};
 
       if (referencedVariables.length > 0) {
         for (const varName of referencedVariables) {
-          // eslint-disable-next-line no-await-in-loop
-          const typeAnswer: PromptAnswer = await prompts({
-            type: 'select',
-            name: 'dataType',
-            message: `Data type for "${varName}"`,
-            description: `Select the Salesforce field type that matches ${varName}`,
-            choices: [
-              { title: 'Text', value: 'text' },
-              { title: 'Number', value: 'number' },
-              { title: 'Checkbox', value: 'checkbox' },
-              { title: 'Date', value: 'date' },
-              { title: 'Time', value: 'time' },
-              { title: 'Datetime', value: 'datetime' },
-              { title: 'Picklist', value: 'picklist' },
-              { title: 'MultiPicklist', value: 'multipicklist' },
-              { title: 'Null', value: 'null' },
-            ],
-          });
+          const inferred = typeMap.get(varName)?.dataType;
+          let dataType: FormulaDataType;
+          if (inferred) {
+            dataType = inferred;
+            uxLog('log', this, c.grey(`  ${varName}: using org-inferred type "${dataType}".`));
+          } else {
+            // eslint-disable-next-line no-await-in-loop
+            const typeAnswer: PromptAnswer = await prompts({
+              type: 'select',
+              name: 'dataType',
+              message: `Data type for "${varName}"`,
+              description: `Select the Salesforce field type that matches ${varName}`,
+              choices: [
+                { title: 'Text', value: 'text' },
+                { title: 'Number', value: 'number' },
+                { title: 'Checkbox', value: 'checkbox' },
+                { title: 'Date', value: 'date' },
+                { title: 'Time', value: 'time' },
+                { title: 'Datetime', value: 'datetime' },
+                { title: 'Picklist', value: 'picklist' },
+                { title: 'MultiPicklist', value: 'multipicklist' },
+                { title: 'Null', value: 'null' },
+              ],
+            });
+            dataType = typeAnswer.dataType as FormulaDataType;
+          }
 
-          const dataType = typeAnswer.dataType as FormulaDataType;
           const varQuestion = FormulaEvaluate.buildVariablePrompt(varName, dataType);
           // eslint-disable-next-line no-await-in-loop
           const varAnswer: PromptAnswer = await prompts(varQuestion);
-          const rawValue = varAnswer[varName];
-
           record[varName] = {
             type: 'literal',
             dataType,
-            value: FormulaEvaluate.coerceValue(rawValue, dataType),
-          };
+            value: FormulaEvaluate.coerceValue(varAnswer[varName], dataType),
+            options: typeMap.get(varName)?.options ?? {},
+          } as FormulaVariable;
         }
       } else {
         uxLog('log', this, c.grey('No field variables detected. Evaluating as a constant formula.'));
       }
 
-      const iterationSummary = this.evaluate(formula, [record]);
+      const iterationSummary = this.evaluate(formula, [record], tolerance);
       evaluatedRecords.push(...iterationSummary.results);
-
-      const mergedResults: FormulaEvaluationResult[] = evaluatedRecords.map((r, idx) => ({
-        ...r,
-        recordIndex: idx,
-      }));
-
+      const mergedResults = evaluatedRecords.map((r, idx) => ({ ...r, recordIndex: idx }));
       summary = {
         ...iterationSummary,
         results: mergedResults,
         successCount: mergedResults.filter((r) => !r.isError).length,
         errorCount: mergedResults.filter((r) => r.isError).length,
+        assertionsEvaluated: mergedResults.filter((r) => r.assertion !== undefined).length,
+        assertionFailures: mergedResults.filter((r) => r.assertion !== undefined && !r.assertion.passed).length,
       };
-
-      this.display(summary, debugMode);
+      this.display(summary, debugMode, outputFormat, outputfile);
 
       // eslint-disable-next-line no-await-in-loop
       const repeatAnswer: PromptAnswer = await prompts({
@@ -296,22 +335,23 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
         description: 'Select Yes to enter new variable values and re-evaluate the same formula.',
         initial: false,
       });
-
       keepGoing = repeatAnswer.repeat === true;
     }
-
     return summary!;
   }
 
-  private async runJsonContent(debugMode: boolean): Promise<FormulaEvaluationSummary> {
+  private async runJsonContent(
+    debugMode: boolean,
+    outputFormat: OutputFormat,
+    outputfile: string | undefined,
+    tolerance: number | undefined
+  ): Promise<FormulaEvaluationSummary> {
     const modelContent = JSON.stringify(buildModelJson("IF(MyField__c, 'Yes', 'No')"), null, 2);
-
     const fileAnswer: PromptAnswer = await prompts({
       type: 'text',
       name: 'fileContent',
       message: 'JSON content for multi-evaluation',
-      description:
-        'Edit the "records" array. Each field key maps to a formula variable. Supported dataType values: text | number | checkbox | date | time | datetime | geolocation | null',
+      description: 'Edit the "records" array. Each field key maps to a formula variable.',
       placeholder: modelContent,
       initial: modelContent,
       validate: (v: string) => {
@@ -326,130 +366,45 @@ export default class FormulaEvaluate extends SfCommand<AnyJson> {
       },
     });
 
-    uxLog('log', this, c.grey('Reading records from JSON…'));
-
-    try {
-      const raw = JSON.parse(fileAnswer.fileContent as string) as InputFileJson;
-      const resolvedFormula: string = raw.formula;
-      const fileRecords: FormulaVariableMap[] = Array.isArray(raw?.records) ? raw.records : [];
-
-      if (fileRecords.length === 0) {
-        throw new Error('No records found. Make sure the JSON has a "records" array with at least one entry.');
-      }
-
-      const summary = this.evaluate(resolvedFormula, fileRecords);
-      this.display(summary, debugMode);
-      return summary;
-    } catch (_) {
-      throw new Error('The JSON provided is invalid.');
-    }
+    const raw = JSON.parse(fileAnswer.fileContent as string) as InputFileJson;
+    const fileRecords: FormulaVariableMap[] = Array.isArray(raw?.records) ? raw.records : [];
+    if (fileRecords.length === 0)
+      throw new Error('No records found. Provide a "records" array with at least one entry.');
+    const summary = this.evaluate(raw.formula, fileRecords, tolerance);
+    this.display(summary, debugMode, outputFormat, outputfile);
+    return summary;
   }
 
-  private evaluate(formula: string, records: FormulaVariableMap[]): FormulaEvaluationSummary {
+  private evaluate(
+    formula: string,
+    records: FormulaVariableMap[],
+    tolerance: number | undefined
+  ): FormulaEvaluationSummary {
     uxLog('log', this, c.grey(`\nEvaluating formula against ${records.length} record(s)…`));
-
-    const normalizedRecords: FormulaVariableMap[] = records.map((record) =>
+    const normalized: FormulaVariableMap[] = records.map((record) =>
       Object.fromEntries(
         Object.entries(record).map(([key, descriptor]) => [key, { ...descriptor, type: 'literal' } as FormulaVariable])
       )
     );
-
-    return evaluateFormulaForRecords(formula, normalizedRecords);
+    return evaluateFormulaForRecords(formula, normalized, { tolerance });
   }
 
-  private display(summary: FormulaEvaluationSummary, debugMode: boolean): void {
-    const variableColumns = [
-      ...new Set(summary.results.flatMap((r) => Object.keys(r.variables).filter((k) => k !== EXPECTED_KEY))),
-    ];
+  private display(
+    summary: FormulaEvaluationSummary,
+    debugMode: boolean,
+    outputFormat: OutputFormat,
+    outputfile: string | undefined
+  ): void {
+    renderSummaryTable(this, summary);
 
-    const hasExpected = summary.results.some((r) => r.expected !== undefined);
-
-    const columns = [
-      'record',
-      ...variableColumns.map((v) => `${v}_type`),
-      ...variableColumns.map((v) => `${v}_value`),
-      'result_type',
-      'result_value',
-      'status',
-      ...(hasExpected ? ['expected', 'assertion'] : []),
-    ];
-
-    uxLog('success', this, c.green('Formula evaluation results'));
-    uxLog('other', this, c.white(`Formula: ${summary.formula}`));
-
-    const tableRows = summary.results.map((r) => {
-      const row: Record<string, string> = {
-        record: `#${r.recordIndex + 1}`,
-      };
-
-      for (const varName of variableColumns) {
-        const varDescriptor = r.variables[varName];
-        row[`${varName}_type`] = varDescriptor?.dataType ?? '-';
-        row[`${varName}_value`] = varDescriptor !== undefined ? JSON.stringify(varDescriptor.value) : '-';
-      }
-
-      if (r.isError) {
-        const err = r.result as FormulaErrorResult;
-        row['result_type'] = err.errorType ?? 'error';
-        row['result_value'] = err.message ?? '';
-        row['status'] = 'ERROR';
-      } else {
-        const lit = r.result as FormulaLiteralResult;
-        row['result_type'] = lit.dataType ?? '';
-        row['result_value'] = JSON.stringify(lit.value);
-        row['status'] = 'OK';
-      }
-
-      if (hasExpected) {
-        if (r.expected === undefined) {
-          row['expected'] = '-';
-          row['assertion'] = '-';
-        } else {
-          const actualValue = r.isError ? undefined : (r.result as FormulaLiteralResult).value;
-          // eslint-disable-next-line eqeqeq
-          const passed = !r.isError && actualValue == r.expected;
-          row['expected'] = JSON.stringify(r.expected);
-          row['assertion'] = passed
-            ? '✅ PASS'
-            : `❌ FAIL - expected ${JSON.stringify(r.expected)}, got ${JSON.stringify(actualValue)}`;
-        }
-      }
-
-      return row;
-    });
-
-    uxLogTable(this, tableRows, columns);
-
-    const assertionFailures = hasExpected
-      ? summary.results.filter((r) => {
-          if (r.expected === undefined) return false;
-          if (r.isError) return true;
-          // eslint-disable-next-line eqeqeq
-          return (r.result as FormulaLiteralResult).value != r.expected;
-        }).length
-      : 0;
-
-    if (summary.errorCount === 0 && assertionFailures === 0) {
-      uxLog('action', this, c.green(`Formula evaluated successfully for all ${summary.successCount} record(s).`));
-    } else {
-      if (summary.errorCount > 0) {
-        uxLog(
-          'warning',
-          this,
-          c.yellow(`Evaluation complete: ${summary.successCount} succeeded, ${summary.errorCount} failed.`)
-        );
-      }
-      if (assertionFailures > 0) {
-        uxLog(
-          'warning',
-          this,
-          c.red(`Assertion failures: ${assertionFailures} record(s) did not match the expected value.`)
-        );
-      }
+    if (outputFormat !== 'table') {
+      const serialized = serializeSummaries([summary], outputFormat);
+      if (outputfile) writeToFile(this, outputfile, serialized);
+      else uxLog('other', this, serialized);
+    } else if (outputfile) {
+      writeToFile(this, outputfile, serializeSummaries([summary], 'json'));
     }
 
-    if (debugMode) {
-      uxLog('log', this, c.grey(formatEvaluationSummary(summary)));
-    }
+    if (debugMode) uxLog('log', this, c.grey(formatEvaluationSummary(summary)));
   }
 }

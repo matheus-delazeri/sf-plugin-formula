@@ -291,7 +291,9 @@ describe('formulaUtils', () => {
       const summary = evaluateFormulaForRecords('IF(TRUE, "Yes", "No")', [{}]);
       const json = summaryToJson(summary);
 
-      expect(json).to.have.all.keys(['formula', 'referencedVariables', 'successCount', 'errorCount', 'results']);
+      expect(json).to.include.all.keys(['formula', 'referencedVariables', 'successCount', 'errorCount', 'results']);
+      expect(json).to.have.property('passed');
+      expect(json).to.have.property('assertionFailures');
       expect(json.results).to.be.an('array');
     });
   });
