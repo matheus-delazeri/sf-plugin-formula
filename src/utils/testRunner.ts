@@ -68,10 +68,16 @@ export type SuiteRun = {
   summaries: FormulaEvaluationSummary[];
   totalRecords: number;
   totalErrors: number;
+  /** Errors on records that did NOT assert an error via `_expected.errorType`. */
+  totalUnexpectedErrors: number;
   totalAssertions: number;
   totalAssertionFailures: number;
   passed: boolean;
 };
+
+export function unexpectedErrorCount(summary: FormulaEvaluationSummary): number {
+  return summary.results.filter((r) => r.isError && (r.assertion === undefined || !r.assertion.passed)).length;
+}
 
 export function runTestCases(cases: TestCase[], defaults: { tolerance?: number } = {}): SuiteRun {
   const summaries = cases.map((c) => {
@@ -85,6 +91,7 @@ export function runTestCases(cases: TestCase[], defaults: { tolerance?: number }
 
   const totalRecords = summaries.reduce((n, s) => n + s.results.length, 0);
   const totalErrors = summaries.reduce((n, s) => n + s.errorCount, 0);
+  const totalUnexpectedErrors = summaries.reduce((n, s) => n + unexpectedErrorCount(s), 0);
   const totalAssertions = summaries.reduce((n, s) => n + s.assertionsEvaluated, 0);
   const totalAssertionFailures = summaries.reduce((n, s) => n + s.assertionFailures, 0);
 
@@ -92,9 +99,10 @@ export function runTestCases(cases: TestCase[], defaults: { tolerance?: number }
     summaries,
     totalRecords,
     totalErrors,
+    totalUnexpectedErrors,
     totalAssertions,
     totalAssertionFailures,
-    passed: totalAssertionFailures === 0 && totalErrors === 0,
+    passed: totalAssertionFailures === 0 && totalUnexpectedErrors === 0,
   };
 }
 

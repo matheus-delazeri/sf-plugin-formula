@@ -122,7 +122,6 @@ export function evaluateAssertion(
   isError: boolean,
   expected: FormulaExpected
 ): FormulaAssertion {
-  // Error expectation
   if (expected.errorType !== undefined) {
     if (!isError) {
       return { evaluated: true, passed: false, reason: 'expected an error but formula succeeded', expected };
@@ -166,6 +165,19 @@ export function evaluateAssertion(
   return { evaluated: true, passed: true, expected };
 }
 
+/**
+ * Formulon expects real JS `Date` objects for date/datetime values. Records loaded
+ * from JSON carry date strings, so coerce them here (idempotent for existing Dates).
+ */
+function coerceVariableValue(variable: FormulaVariable): FormulaVariable {
+  const { dataType, value } = variable;
+  if (value === null || value === undefined || value instanceof Date) return variable;
+  if ((dataType === 'date' || dataType === 'datetime') && (typeof value === 'string' || typeof value === 'number')) {
+    return { ...variable, value: new Date(value) };
+  }
+  return variable;
+}
+
 export function evaluateFormulaForRecords(
   formula: string,
   records: FormulaVariableMap[],
@@ -185,7 +197,9 @@ export function evaluateFormulaForRecords(
     try {
       rawResult = (parse as (f: string, vars: FormulaVariableMap) => FormulaParseResult)(
         formula,
-        Object.fromEntries(Object.entries(variables).map(([key, v]) => [key, { ...v, options: v.options ?? {} }]))
+        Object.fromEntries(
+          Object.entries(variables).map(([key, v]) => [key, coerceVariableValue({ ...v, options: v.options ?? {} })])
+        )
       );
 
       const maxScale = Math.max(

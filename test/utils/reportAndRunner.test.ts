@@ -73,3 +73,24 @@ describe('testRunner', () => {
     expect(diffSnapshots(s1, mutated).length).to.be.greaterThan(0);
   });
 });
+
+describe('testRunner expected-error handling', () => {
+  it('treats an asserted error as a pass, not a suite failure', () => {
+    const cases = [
+      {
+        name: 'expected error',
+        formula: 'IF(Rating = "Hot", 1, 0)',
+        records: [
+          {
+            Rating: { type: 'literal' as const, dataType: 'picklist' as const, value: 'Hot' },
+            _expected: { errorType: '*' } as never,
+          },
+        ],
+        sourceFile: 'inline',
+      },
+    ];
+    const run = runTestCases(cases);
+    expect(run.totalUnexpectedErrors).to.equal(0);
+    expect(run.passed).to.be.true;
+  });
+});

@@ -114,3 +114,13 @@ describe('assertions end-to-end + exit codes', () => {
     expect(exitCodeFor(bad, true)).to.equal(1);
   });
 });
+
+describe('date coercion + expected-error semantics (regression)', () => {
+  it('evaluates date comparisons from JSON string values', () => {
+    const summary = evaluateFormulaForRecords('IF(D__c < TODAY() - 90, "Stale", "Active")', [
+      { D__c: { type: 'literal', dataType: 'date', value: '2000-01-01' }, _expected: { value: 'Stale' } as never },
+      { D__c: { type: 'literal', dataType: 'date', value: '2999-01-01' }, _expected: { value: 'Active' } as never },
+    ]);
+    expect(summary.assertionFailures).to.equal(0);
+  });
+});

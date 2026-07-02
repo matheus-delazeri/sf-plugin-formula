@@ -4,7 +4,15 @@ import c from 'chalk';
 import { Messages } from '@salesforce/core';
 import { AnyJson } from '@salesforce/ts-types';
 import { uxLog, uxLogTable } from 'sfdx-hardis/plugin-api';
-import { loadTestCases, runTestCases, buildSnapshot, diffSnapshots, type Snapshot } from '../../utils/testRunner.js';
+import {
+  loadTestCases,
+  runTestCases,
+  buildSnapshot,
+  diffSnapshots,
+  unexpectedErrorCount,
+  type SuiteRun,
+  type Snapshot,
+} from '../../utils/testRunner.js';
 import { serializeSummaries } from '../../utils/ioUtils.js';
 import { type OutputFormat } from '../../utils/reportUtils.js';
 
@@ -38,26 +46,20 @@ export default class FormulaTest extends SfCommand<AnyJson> {
 
     const run = runTestCases(cases, { tolerance: flags.tolerance });
 
-    const rows = run.summaries.map((s) => ({
-      test: s.name ?? s.formula,
-      records: s.results.length,
-      errors: s.errorCount,
-      assertions: s.assertionsEvaluated,
-      failures: s.assertionFailures,
-      status: s.errorCount === 0 && s.assertionFailures === 0 ? '✅ PASS' : '❌ FAIL',
-    }));
+    const rows = run.summaries.map((s) => {
+      const unexpected = unexpectedErrorCount(s);
+      return {
+        test: s.name ?? s.formula,
+        records: s.results.length,
+        errors: unexpected,
+        assertions: s.assertionsEvaluated,
+        failures: s.assertionFailures,
+        status: unexpected === 0 && s.assertionFailures === 0 ? '✅ PASS' : '❌ FAIL',
+      };
+    });
     uxLogTable(this, rows, ['test', 'records', 'errors', 'assertions', 'failures', 'status']);
 
-    for (const s of run.summaries) {
-      for (const r of s.results) {
-        if (r.assertion && !r.assertion.passed) {
-          uxLog('warning', this, c.red(`  ✗ ${r.name ?? ''}: ${r.assertion.reason ?? ''}`));
-        } else if (r.isError && !r.assertion) {
-          const err = r.result as { errorType: string; message: string };
-          uxLog('warning', this, c.yellow(`  ! ${r.name ?? ''}: ${err.errorType}: ${err.message}`));
-        }
-      }
-    }
+    this.logFailures(run.summaries);
 
     let snapshotMismatches = 0;
     if (flags.snapshot) {
@@ -93,7 +95,7 @@ export default class FormulaTest extends SfCommand<AnyJson> {
         'error',
         this,
         c.red(
-          `FAILED: ${run.totalAssertionFailures} assertion failure(s), ${run.totalErrors} error(s), ${snapshotMismatches} snapshot mismatch(es).`
+          `FAILED: ${run.totalAssertionFailures} assertion failure(s), ${run.totalUnexpectedErrors} unexpected error(s), ${snapshotMismatches} snapshot mismatch(es).`
         )
       );
     }
@@ -104,9 +106,24 @@ export default class FormulaTest extends SfCommand<AnyJson> {
       cases: cases.length,
       totalRecords: run.totalRecords,
       totalErrors: run.totalErrors,
+      totalUnexpectedErrors: run.totalUnexpectedErrors,
       totalAssertions: run.totalAssertions,
       totalAssertionFailures: run.totalAssertionFailures,
       snapshotMismatches,
     } as AnyJson;
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  private logFailures(summaries: SuiteRun['summaries']): void {
+    for (const s of summaries) {
+      for (const r of s.results) {
+        if (r.assertion && !r.assertion.passed) {
+          uxLog('warning', this, c.red(`  ✗ ${r.name ?? ''}: ${r.assertion.reason ?? ''}`));
+        } else if (r.isError && (r.assertion === undefined || !r.assertion.passed)) {
+          const err = r.result as { errorType: string; message: string };
+          uxLog('warning', this, c.yellow(`  ! ${r.name ?? ''}: ${err.errorType}: ${err.message}`));
+        }
+      }
+    }
   }
 }
