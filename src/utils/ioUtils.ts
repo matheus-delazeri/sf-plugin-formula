@@ -16,12 +16,17 @@ export function renderSummaryTable(command: unknown, summary: FormulaEvaluationS
   ];
   const hasAssertion = summary.results.some((r) => r.assertion !== undefined);
 
+  const fieldType = (field: string): string => {
+    const typed = summary.results.map((r) => r.variables[field]).find((d) => d && d.dataType !== 'null');
+    const any = summary.results.map((r) => r.variables[field]).find((d) => d);
+    return typed?.dataType ?? any?.dataType ?? '-';
+  };
+  const fieldHeader = (field: string): string => `${field}:${fieldType(field)}`;
+
   const columns = [
     'record',
-    ...variableColumns.map((v) => `${v}_type`),
-    ...variableColumns.map((v) => `${v}_value`),
-    'result_type',
-    'result_value',
+    ...variableColumns.map(fieldHeader),
+    'result',
     'status',
     ...(hasAssertion ? ['assertion'] : []),
   ];
@@ -33,18 +38,15 @@ export function renderSummaryTable(command: unknown, summary: FormulaEvaluationS
     const row: Record<string, string> = { record: `#${r.recordIndex + 1}` };
     for (const varName of variableColumns) {
       const descriptor = r.variables[varName];
-      row[`${varName}_type`] = descriptor?.dataType ?? '-';
-      row[`${varName}_value`] = descriptor !== undefined ? JSON.stringify(descriptor.value) : '-';
+      row[fieldHeader(varName)] = descriptor !== undefined ? JSON.stringify(descriptor.value) : '-';
     }
     if (r.isError) {
       const err = r.result as FormulaErrorResult;
-      row['result_type'] = err.errorType ?? 'error';
-      row['result_value'] = err.message ?? '';
+      row['result'] = `ERROR: ${err.message ?? err.errorType ?? 'error'}`;
       row['status'] = 'ERROR';
     } else {
       const lit = r.result as FormulaLiteralResult;
-      row['result_type'] = lit.dataType ?? '';
-      row['result_value'] = JSON.stringify(lit.value);
+      row['result'] = `${JSON.stringify(lit.value)} (${lit.dataType ?? '?'})`;
       row['status'] = 'OK';
     }
     if (hasAssertion) {
